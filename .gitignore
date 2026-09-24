@@ -8,3 +8,6 @@ __pycache__/
 !samples/*.xlsx
 .DS_Store
 .idea/
+
+# Real statements for local testing — never committed
+samples/private/
