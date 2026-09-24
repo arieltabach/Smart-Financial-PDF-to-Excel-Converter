@@ -13,6 +13,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+from converter.anonymizer import Anonymizer
 from converter.data_cleaner import COLUMNS, rows_to_dataframe, validate_running_balance
 from converter.excel_exporter import to_excel_bytes
 from converter.llm_parser import DEFAULT_HOST, DEFAULT_MODEL, OllamaClient, OllamaError, parse_statement
@@ -27,6 +28,8 @@ for key, default in {
     "extracted": None,
     "source_name": "",
     "elapsed": 0.0,
+    "mask_report": None,
+    "masked_preview": "",
 }.items():
     st.session_state.setdefault(key, default)
 
@@ -58,6 +61,26 @@ with st.sidebar:
         help="Many Hebrew PDFs extract with reversed letters. 'auto' detects and repairs this.",
     )
     dayfirst = st.toggle("Dates are day-first (DD/MM/YYYY)", value=True)
+
+    st.subheader("🔒 Privacy")
+    is_local_host = any(h in host for h in ("localhost", "127.0.0.1", "0.0.0.0", "::1"))
+    mask_enabled = st.toggle(
+        "Mask identifiers before sending to the model",
+        value=not is_local_host,
+        help="Account/card/ID numbers, IBANs, e-mails and account-holder lines are replaced by same-shape fake "
+             "values before the text leaves this machine, and restored in the result. Amounts, dates and merchant "
+             "names are kept — the parser needs them. Recommended whenever the Ollama host is not this computer.",
+    )
+    extra_terms_raw = st.text_input(
+        "Extra words to hide (comma-separated)",
+        value="",
+        placeholder="your name, employer, street…",
+        help="Anything listed here is replaced by 'Customer A/B/…' before sending.",
+        disabled=not mask_enabled,
+    )
+    extra_terms = [t.strip() for t in extra_terms_raw.split(",") if t.strip()]
+    if not is_local_host and not mask_enabled:
+        st.warning("Remote Ollama host with masking off: the statement text will leave this machine as-is.", icon="⚠️")
 
     with st.expander("Advanced"):
         max_chars = st.slider("Chunk size (characters per LLM call)", 2000, 16000, 6000, step=500,
@@ -101,6 +124,18 @@ def run_pipeline(file_bytes: bytes, name: str) -> None:
         st.error("This PDF has no extractable text (probably a scanned image). OCR is not part of this MVP.")
         return
 
+    pages = doc.pages
+    anonymizer: Anonymizer | None = None
+    if mask_enabled:
+        anonymizer = Anonymizer(extra_terms=extra_terms)
+        pages = [anonymizer.mask(p) for p in pages]
+        st.session_state.mask_report = anonymizer.report
+        st.session_state.masked_preview = "\n\n".join(pages)
+        status.write(f"🔒 Masked before sending: {anonymizer.report.summary()}")
+    else:
+        st.session_state.mask_report = None
+        st.session_state.masked_preview = ""
+
     status.write(f"🧠 Parsing with `{model}` via Ollama…")
     bar = status.progress(0.0)
 
@@ -108,11 +143,13 @@ def run_pipeline(file_bytes: bytes, name: str) -> None:
         bar.progress(i / n, text=f"Chunk {i}/{n}")
 
     try:
-        rows = parse_statement(doc.pages, client, model=model, max_chars=max_chars, num_ctx=num_ctx, progress=_progress)
+        rows = parse_statement(pages, client, model=model, max_chars=max_chars, num_ctx=num_ctx, progress=_progress)
     except OllamaError as exc:
         status.update(label="LLM parsing failed", state="error")
         st.error(str(exc))
         return
+    if anonymizer is not None:
+        rows = anonymizer.restore_rows(rows)
 
     status.write(f"🧹 Cleaning {len(rows)} raw row(s) and validating balances…")
     df = rows_to_dataframe(rows, dayfirst=dayfirst)
@@ -137,6 +174,11 @@ doc = st.session_state.extracted
 if show_raw and doc is not None:
     with st.expander("Extracted raw text", expanded=False):
         st.text(doc.text[:20000])
+
+if st.session_state.mask_report is not None and doc is not None:
+    with st.expander(f"🔒 What the model saw (masked: {st.session_state.mask_report.summary()})", expanded=False):
+        st.caption("Fake values are consistent within the document and were swapped back to the originals in the table below.")
+        st.text(st.session_state.masked_preview[:20000])
 
 if df is not None:
     if df.empty:

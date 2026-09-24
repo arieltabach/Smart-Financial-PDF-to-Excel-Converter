@@ -20,6 +20,7 @@ financial data never leaves your laptop.
 * **Cleaning** – ₪/$/€ symbols, thousands separators, `(negatives)`, trailing minus, bidi marks; day-first dates; signed-amount normalisation into Debit/Credit.
 * **Math validation** – checks every running balance (`balance = previous + credit − debit`), auto-detects oldest-first vs newest-first statements, flags mismatches, and **auto-corrects** an amount the model put in the wrong column when the printed balance proves the swap.
 * **Table-aware prompting** – ruled tables are sent to the model as `Header: value` cells, so it never has to count columns; opening/closing balance lines are filtered deterministically (English + Hebrew).
+* **Privacy masking for remote models** – when the Ollama host is not this machine, account/card/ID numbers, IBANs, e-mails and account-holder lines are swapped for same-shape fake values *before* the text leaves your computer and swapped back in the result. Amounts, dates and merchant names stay so parsing quality is unchanged. Add your own name/employer to the "extra words" box.
 * **Excel export** – styled header, number/date formats, auto-fit widths, freeze panes, auto-filter, mismatch rows highlighted, `Summary` sheet, **sheet direction RTL** when Hebrew is present.
 
 ## Quick start
@@ -83,6 +84,7 @@ samples/demo_statement.pdf synthetic statement for a first run
 * **Ollama host** – defaults to `http://localhost:11434` (or `$OLLAMA_HOST`).
 * **Model** – any model you have pulled; `llama3.1:8b` recommended, `qwen2.5:7b` for Hebrew.
 * **Hebrew / RTL text fix** – `auto` (default), `on`, `off`.
+* **Privacy** – masking toggle (default on for non-local hosts) + extra words to hide. The "What the model saw" expander shows exactly what was sent.
 * **Advanced** – chunk size per LLM call, `num_ctx`, raw-text viewer.
 
 ## Development
@@ -90,7 +92,7 @@ samples/demo_statement.pdf synthetic statement for a first run
 ```bash
 pip install -r requirements-dev.txt
 python scripts/make_sample_pdf.py        # regenerate the sample
-pytest                                   # 52 tests, ~1 s, no Ollama needed
+pytest                                   # 62 tests, ~1 s, no Ollama needed
 ```
 
 Try the UI without a model:
@@ -105,6 +107,21 @@ OLLAMA_HOST=http://localhost:11435 streamlit run app.py
 `samples/demo_statement.pdf` through the real pipeline with `qwen2.5:7b` on an
 Apple M4 Pro: 9/9 transactions, all columns correct, running-balance check PASS,
 about 14 s end to end. Three consecutive runs gave identical results.
+
+## Running the model somewhere else
+
+Ollama is just an HTTP API, so the app works unchanged against a remote host
+(sidebar field or `OLLAMA_HOST`). Options, all free of model fees:
+
+| Where | How | Privacy |
+|---|---|---|
+| Another machine you own | `OLLAMA_HOST=0.0.0.0 ollama serve` there; reach it over Tailscale (free personal plan) | Full — data stays on your machines |
+| Ollama Cloud | `ollama signin`, pull a `-cloud` model; the local daemon proxies | Text leaves your machine → **enable masking** |
+| Free-tier providers (Groq, OpenRouter…) | Need a small OpenAI-compatible adapter in `llm_parser.py` (not included) | Same — enable masking |
+
+With masking on, a remote provider sees realistic-looking but fake account
+numbers, IDs and names; it still sees merchant names and amounts, which the
+parser cannot work without.
 
 ## Limitations (MVP)
 
