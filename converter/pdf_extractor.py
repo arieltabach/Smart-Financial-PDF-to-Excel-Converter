@@ -77,13 +77,40 @@ def fix_rtl_text(text: str) -> str:
     return "\n".join(out)
 
 
+_NUMERIC_CELL_RE = re.compile(r"^[\s\d.,\-()₪$€£%/]+$")
+
+
+def _looks_like_header(cells: list[str]) -> bool:
+    filled = [c for c in cells if c]
+    return len(filled) >= 2 and not any(_NUMERIC_CELL_RE.match(c) for c in filled)
+
+
 def _table_to_text(table: Iterable[Iterable[str | None]]) -> str:
+    """Render a pdfplumber table for the LLM.
+
+    When the first row is a header, every cell is emitted as ``Header: value``
+    so a small model never has to count pipe positions to know which column
+    an amount belongs to.  Empty cells become ``-``.
+    """
     rows = []
     for row in table:
         cells = [(c or "").replace("\n", " ").strip() for c in row]
         if any(cells):
-            rows.append(" | ".join(cells))
-    return "\n".join(rows)
+            rows.append(cells)
+    if not rows:
+        return ""
+    header = rows[0] if _looks_like_header(rows[0]) else None
+    out = []
+    if header is not None:
+        out.append(" | ".join(h or f"col{i}" for i, h in enumerate(header, start=1)))
+        for cells in rows[1:]:
+            pairs = []
+            for i, (h, v) in enumerate(zip(header, cells), start=1):
+                pairs.append(f"{h or f'col{i}'}: {v or '-'}")
+            out.append(" | ".join(pairs))
+    else:
+        out = [" | ".join(c or "-" for c in cells) for cells in rows]
+    return "\n".join(out)
 
 
 def extract_pdf(file: bytes | io.BytesIO | str, rtl_mode: RtlMode = "auto") -> ExtractedDocument:
@@ -110,10 +137,13 @@ def extract_pdf(file: bytes | io.BytesIO | str, rtl_mode: RtlMode = "auto") -> E
             tables = page.extract_tables() or []
             doc.n_tables += len(tables)
             table_text = "\n\n".join(_table_to_text(t) for t in tables if t)
-            if table_text.strip():
-                text = f"{text}\n\n[TABLES]\n{table_text}"
-            # collapse runs of spaces that layout mode produces
+            # collapse runs of spaces / blank lines that layout mode produces
             text = re.sub(r"[ \t]{3,}", "  ", text)
+            text = re.sub(r"(?:[ \t]*\n){3,}", "\n\n", text)
+            # Ruled tables are far less ambiguous than free text, so they go
+            # first and the model is told to prefer them.
+            if table_text.strip():
+                text = f"[TABLES]\n{table_text}\n\n[TEXT]\n{text}"
             doc.pages.append(text.strip())
 
     full = "\n".join(doc.pages)

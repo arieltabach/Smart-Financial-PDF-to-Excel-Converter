@@ -9,7 +9,7 @@ from openpyxl import load_workbook
 
 from converter.data_cleaner import rows_to_dataframe, validate_running_balance
 from converter.excel_exporter import to_excel_bytes
-from converter.pdf_extractor import contains_hebrew, extract_pdf, fix_rtl_text, looks_reversed
+from converter.pdf_extractor import _table_to_text, contains_hebrew, extract_pdf, fix_rtl_text, looks_reversed
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -27,8 +27,23 @@ def test_extract_pdf_text_and_tables(sample_pdf):
     assert doc.n_tables >= 1
     assert "SUPER-PHARM" in doc.pages[0]
     assert "12,500.00" in doc.pages[0]
-    assert "[TABLES]" in doc.pages[0]
+    assert doc.pages[0].startswith("[TABLES]")
+    assert "[TEXT]" in doc.pages[0]
+    assert "Description: Wolt delivery | Reference: 4471 | Debit: 74.50 | Credit: - | Balance: 9,296.24" in doc.pages[0]
     assert not doc.has_hebrew and not doc.rtl_fixed
+
+
+def test_table_to_text_labels_cells_with_header():
+    table = [["Date", "Desc", "Debit", "Credit"], ["1/1/25", "x", "5", None], [None, None, None, None]]
+    out = _table_to_text(table).splitlines()
+    assert out[0] == "Date | Desc | Debit | Credit"
+    assert out[1] == "Date: 1/1/25 | Desc: x | Debit: 5 | Credit: -"
+    assert len(out) == 2
+
+
+def test_table_to_text_without_header_uses_pipes():
+    out = _table_to_text([["1/1/25", "x", "5", ""], ["2/1/25", "y", "", "7"]])
+    assert out == "1/1/25 | x | 5 | -\n2/1/25 | y | - | 7"
 
 
 def test_contains_hebrew():

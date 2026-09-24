@@ -18,6 +18,13 @@ from dateutil import parser as dateparser
 
 COLUMNS = ["Date", "Description", "Reference", "Debit", "Credit", "Amount", "Balance"]
 
+# Balance-only lines that are not transactions (English + Hebrew).
+_NON_TXN_RE = re.compile(
+    r"(?:opening|closing|previous|brought forward|carried forward|b/f|c/f|balance forward"
+    r"|יתרת פתיחה|יתרה קודמת|יתרת סגירה|יתרה לתחילת|יתרה לסוף|העברה מדף קודם)",
+    re.IGNORECASE,
+)
+
 _CURRENCY_RE = re.compile(r"(₪|\$|€|£|ש\"ח|ש״ח|שח|NIS|ILS|USD|EUR|GBP)", re.IGNORECASE)
 _KEEP_RE = re.compile(r"[^0-9,.\-()]")
 _BIDI_MARKS = dict.fromkeys(map(ord, "‎‏‪‫‬‭‮⁦⁧⁨⁩"), None)
@@ -132,6 +139,9 @@ def rows_to_dataframe(rows: list[dict], dayfirst: bool = True) -> pd.DataFrame:
     has_money = df[["Debit", "Credit", "Balance"]].notna().any(axis=1)
     has_text = df["Description"].str.len() > 0
     df = df[has_money & (has_text | df["Date"].notna())]
+    # Opening/closing balance lines carry a balance but no movement.
+    balance_only = df["Debit"].isna() & df["Credit"].isna() & df["Description"].str.contains(_NON_TXN_RE, na=False)
+    df = df[~balance_only]
     df = df.drop_duplicates(subset=["Date", "Description", "Reference", "Debit", "Credit", "Balance"])
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
     for col in ("Debit", "Credit", "Amount", "Balance"):
@@ -148,6 +158,7 @@ class ValidationReport:
     n_checked: int
     n_mismatch: int
     direction: str  # "chronological" | "reverse" | "n/a"
+    n_autofixed: int = 0
 
     @property
     def ok(self) -> bool:
@@ -158,12 +169,23 @@ class ValidationReport:
         return self.total_credit - self.total_debit
 
 
-def validate_running_balance(df: pd.DataFrame, tol: float = 0.011) -> tuple[pd.DataFrame, ValidationReport]:
+def _check_series(frame: pd.DataFrame, tol: float = 0.011) -> pd.Series:
+    bal = frame["Balance"]
+    prev = bal.shift(1)
+    expected = prev + frame["Amount"].fillna(0)
+    ok = (bal - expected).abs() <= tol
+    applicable = bal.notna() & prev.notna()
+    return ok.where(applicable, other=pd.NA)
+
+
+def validate_running_balance(df: pd.DataFrame, tol: float = 0.011, autofix: bool = True) -> tuple[pd.DataFrame, ValidationReport]:
     """Check ``balance[i] == balance[i-1] + credit[i] - debit[i]``.
 
     Statements may be printed oldest-first or newest-first; both directions
-    are tried and the one with more consistent rows wins.  Adds a boolean
-    ``Balance OK`` column (``None`` where the check is not applicable).
+    are tried and the one with more consistent rows wins.  With ``autofix``
+    a row whose amount landed in the wrong column (debit vs credit) is
+    swapped when, and only when, the swap reconciles the printed balance.
+    Adds a boolean ``Balance OK`` column (``None`` where not applicable).
     """
     df = df.copy()
     total_debit = float(df["Debit"].fillna(0).sum()) if not df.empty else 0.0
@@ -173,16 +195,34 @@ def validate_running_balance(df: pd.DataFrame, tol: float = 0.011) -> tuple[pd.D
         df["Balance OK"] = None
         return df, ValidationReport(len(df), total_debit, total_credit, 0, 0, "n/a")
 
-    def _check(frame: pd.DataFrame) -> pd.Series:
-        bal = frame["Balance"]
-        prev = bal.shift(1)
-        expected = prev + frame["Amount"].fillna(0)
-        ok = (bal - expected).abs() <= tol
-        applicable = bal.notna() & prev.notna()
-        return ok.where(applicable, other=pd.NA)
+    order = df.index.tolist()
+    n_autofixed = 0
+    if autofix:
+        # Decide direction on the raw data, then walk it once, swapping
+        # Debit<->Credit where (and only where) the swap reconciles the
+        # printed balance exactly.  A wrong-column amount is the most common
+        # small-model slip and the printed balance is hard evidence.
+        fwd_hits = int((_check_series(df) == True).sum())  # noqa: E712
+        rev_hits = int((_check_series(df.iloc[::-1]) == True).sum())  # noqa: E712
+        if rev_hits > fwd_hits:
+            order = order[::-1]
+        prev_bal = None
+        for idx in order:
+            bal = df.at[idx, "Balance"]
+            if prev_bal is not None and pd.notna(bal):
+                amt = df.at[idx, "Amount"]
+                amt = 0.0 if pd.isna(amt) else amt
+                if abs(bal - (prev_bal + amt)) > tol and abs(bal - (prev_bal - amt)) <= tol and amt != 0:
+                    df.at[idx, "Debit"], df.at[idx, "Credit"] = df.at[idx, "Credit"], df.at[idx, "Debit"]
+                    df.at[idx, "Amount"] = -amt
+                    n_autofixed += 1
+            if pd.notna(bal):
+                prev_bal = bal
+        total_debit = float(df["Debit"].fillna(0).sum())
+        total_credit = float(df["Credit"].fillna(0).sum())
 
-    fwd = _check(df)
-    rev = _check(df.iloc[::-1]).iloc[::-1]
+    fwd = _check_series(df, tol)
+    rev = _check_series(df.iloc[::-1], tol).iloc[::-1]
     fwd_hits, rev_hits = int((fwd == True).sum()), int((rev == True).sum())  # noqa: E712
     if rev_hits > fwd_hits:
         chosen, direction = rev, "reverse"
@@ -192,4 +232,4 @@ def validate_running_balance(df: pd.DataFrame, tol: float = 0.011) -> tuple[pd.D
     df["Balance OK"] = chosen.astype("object").where(chosen.notna(), None)
     n_checked = int(chosen.notna().sum())
     n_mismatch = int((chosen == False).sum())  # noqa: E712
-    return df, ValidationReport(len(df), total_debit, total_credit, n_checked, n_mismatch, direction)
+    return df, ValidationReport(len(df), total_debit, total_credit, n_checked, n_mismatch, direction, n_autofixed)

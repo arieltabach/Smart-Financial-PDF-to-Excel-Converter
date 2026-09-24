@@ -152,6 +152,8 @@ if df is not None:
         else:
             m5.metric("Balance check", "n/a", delta="no running balance", delta_color="off")
 
+        if report.n_autofixed:
+            st.info(f"{report.n_autofixed} row(s) had the amount in the wrong column (debit/credit) and were corrected using the printed running balance.", icon="🔧")
         if report.n_checked and not report.ok:
             st.warning(
                 f"{report.n_mismatch} row(s) fail the running-balance check "

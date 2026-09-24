@@ -18,7 +18,8 @@ financial data never leaves your laptop.
 * **Hebrew / RTL repair** – detects visually-ordered Hebrew (reversed letters) and restores logical order with the Unicode bidi algorithm.
 * **Free LLM parsing via Ollama** – structured-output JSON schema, zero temperature, page-aware chunking so long statements fit small context windows.
 * **Cleaning** – ₪/$/€ symbols, thousands separators, `(negatives)`, trailing minus, bidi marks; day-first dates; signed-amount normalisation into Debit/Credit.
-* **Math validation** – checks every running balance (`balance = previous + credit − debit`), auto-detects oldest-first vs newest-first statements, flags mismatches.
+* **Math validation** – checks every running balance (`balance = previous + credit − debit`), auto-detects oldest-first vs newest-first statements, flags mismatches, and **auto-corrects** an amount the model put in the wrong column when the printed balance proves the swap.
+* **Table-aware prompting** – ruled tables are sent to the model as `Header: value` cells, so it never has to count columns; opening/closing balance lines are filtered deterministically (English + Hebrew).
 * **Excel export** – styled header, number/date formats, auto-fit widths, freeze panes, auto-filter, mismatch rows highlighted, `Summary` sheet, **sheet direction RTL** when Hebrew is present.
 
 ## Quick start
@@ -89,7 +90,7 @@ samples/demo_statement.pdf synthetic statement for a first run
 ```bash
 pip install -r requirements-dev.txt
 python scripts/make_sample_pdf.py        # regenerate the sample
-pytest                                   # 45 tests, ~1 s, no Ollama needed
+pytest                                   # 52 tests, ~1 s, no Ollama needed
 ```
 
 Try the UI without a model:
@@ -98,6 +99,12 @@ Try the UI without a model:
 python scripts/fake_ollama.py 11435 &
 OLLAMA_HOST=http://localhost:11435 streamlit run app.py
 ```
+
+## Verified
+
+`samples/demo_statement.pdf` through the real pipeline with `qwen2.5:7b` on an
+Apple M4 Pro: 9/9 transactions, all columns correct, running-balance check PASS,
+about 14 s end to end. Three consecutive runs gave identical results.
 
 ## Limitations (MVP)
 

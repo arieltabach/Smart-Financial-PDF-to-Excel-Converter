@@ -63,11 +63,25 @@ def _rows():
 def test_rows_to_dataframe_shape_and_types():
     df = rows_to_dataframe(_rows())
     assert list(df.columns[:7]) == ["Date", "Description", "Reference", "Debit", "Credit", "Amount", "Balance"]
-    assert len(df) == 3  # noise + duplicate removed
+    assert len(df) == 2  # opening-balance line, noise and duplicate removed
     assert pd.api.types.is_datetime64_any_dtype(df["Date"])
     assert df["Debit"].dtype == float
-    assert df.loc[1, "Amount"] == -20.0
-    assert df.loc[2, "Amount"] == 5000.0
+    assert df.loc[0, "Amount"] == -20.0
+    assert df.loc[1, "Amount"] == 5000.0
+
+
+def test_opening_balance_rows_dropped_in_hebrew_too():
+    rows = [
+        {"date": "01/02/2025", "description": "יתרת פתיחה", "reference": "", "debit": "", "credit": "", "balance": "1,000.00"},
+        {"date": "02/02/2025", "description": "קפה", "reference": "", "debit": "20", "credit": "", "balance": "980.00"},
+    ]
+    df = rows_to_dataframe(rows)
+    assert list(df["Description"]) == ["קפה"]
+
+
+def test_opening_row_kept_when_it_has_a_movement():
+    rows = [{"date": "01/02/2025", "description": "Opening deposit", "reference": "", "debit": "", "credit": "100", "balance": "100"}]
+    assert len(rows_to_dataframe(rows)) == 1
 
 
 def test_signed_amount_in_wrong_column_is_normalised():
@@ -79,8 +93,39 @@ def test_signed_amount_in_wrong_column_is_normalised():
 def test_validate_running_balance_chronological():
     df, report = validate_running_balance(rows_to_dataframe(_rows()))
     assert report.direction == "chronological"
-    assert report.n_checked == 2 and report.n_mismatch == 0 and report.ok
-    assert list(df["Balance OK"]) == [None, True, True]
+    assert report.n_checked == 1 and report.n_mismatch == 0 and report.ok
+    assert list(df["Balance OK"]) == [None, True]
+    assert report.n_autofixed == 0
+
+
+def _swap_rows():
+    return [
+        {"date": "01/02/2025", "description": "A", "reference": "", "debit": "20", "credit": "", "balance": "980.00"},
+        {"date": "02/02/2025", "description": "B (wrong column)", "reference": "", "debit": "", "credit": "74.50", "balance": "905.50"},
+        {"date": "03/02/2025", "description": "C", "reference": "", "debit": "", "credit": "100", "balance": "1,005.50"},
+    ]
+
+
+def test_autofix_swaps_debit_credit_when_balance_proves_it():
+    df, report = validate_running_balance(rows_to_dataframe(_swap_rows()))
+    assert report.n_autofixed == 1 and report.ok
+    assert df.loc[1, "Debit"] == 74.5 and pd.isna(df.loc[1, "Credit"]) and df.loc[1, "Amount"] == -74.5
+    assert report.total_debit == 94.5 and report.total_credit == 100.0
+
+
+def test_autofix_can_be_disabled():
+    df, report = validate_running_balance(rows_to_dataframe(_swap_rows()), autofix=False)
+    assert report.n_autofixed == 0 and report.n_mismatch == 1
+    assert df.loc[1, "Credit"] == 74.5
+
+
+def test_autofix_does_not_touch_genuine_mismatch():
+    rows = _swap_rows()
+    rows[1]["balance"] = "900.00"  # neither +74.5 nor -74.5 reconciles
+    rows[2]["balance"] = "1,000.00"  # consistent again from 900
+    df, report = validate_running_balance(rows_to_dataframe(rows))
+    assert report.n_autofixed == 0 and report.n_mismatch == 1
+    assert df.loc[1, "Credit"] == 74.5
 
 
 def test_validate_running_balance_reverse_order():

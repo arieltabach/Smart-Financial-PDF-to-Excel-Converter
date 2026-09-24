@@ -44,6 +44,11 @@ in English, Hebrew or mixed, and column alignment may be imperfect).
 Extract EVERY transaction row into JSON matching the schema exactly.
 
 Rules:
+- If a [TABLES] section is present, it is the PRIMARY source. Each line is
+  one row; cells are separated by " | " and usually written as
+  "Column name: value" ("-" means empty). Map each cell to the field with the
+  matching meaning and use the [TEXT] section only for context. Never move a
+  value from one cell into another.
 - One JSON object per transaction line. Do not merge or invent rows.
 - Skip page headers, footers, column titles, opening/closing balance lines,
   subtotals, totals, marketing text and account metadata.
